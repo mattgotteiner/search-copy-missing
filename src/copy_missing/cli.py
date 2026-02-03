@@ -81,18 +81,23 @@ async def run_scan(
         key_field = await get_key_field(bundle.source_index, index_name)
         console.print(f"  Key field: {key_field}")
     
-    # Run scan
-    result = await scan_index(
-        source_client=bundle.source_search,
-        dest_client=bundle.destination_search,
-        timestamp_field=config.timestamp_field,
-        key_field=key_field,
-        index_name=index_name,
-        source_endpoint=config.source.endpoint,
-        dest_endpoint=config.destination.endpoint,
-        num_partitions=num_partitions,
-        console=console,
-    )
+    # Create async clients for parallel scanning
+    source_async = factory.create_async_search_client(config.source, index_name)
+    dest_async = factory.create_async_search_client(config.destination, index_name)
+    
+    # Run scan with async clients
+    async with source_async, dest_async:
+        result = await scan_index(
+            source_client=source_async,
+            dest_client=dest_async,
+            timestamp_field=config.timestamp_field,
+            key_field=key_field,
+            index_name=index_name,
+            source_endpoint=config.source.endpoint,
+            dest_endpoint=config.destination.endpoint,
+            num_partitions=num_partitions,
+            console=console,
+        )
     
     # Persist results
     state_store = StateStore(config.state_dir)
@@ -125,20 +130,24 @@ async def run_copy(
         console.print("[green]No missing documents to copy[/green]")
         return 0
     
-    # Create clients
+    # Create async clients for parallel copying
     factory = ClientFactory()
-    bundle = factory.create_bundle(config.source, config.destination, index_name)
+    source_async = factory.create_async_search_client(config.source, index_name)
+    dest_async = factory.create_async_search_client(config.destination, index_name)
     
-    # Run copy
-    success, failure = await copy_missing_docs(
-        source_client=bundle.source_search,
-        dest_client=bundle.destination_search,
-        key_field=scan_result.key_field,
-        scan_result=scan_result,
-        state_store=state_store,
-        console=console,
-        resume=resume,
-    )
+    # Run copy with async clients
+    async with source_async, dest_async:
+        success, failure = await copy_missing_docs(
+            source_client=source_async,
+            dest_client=dest_async,
+            key_field=scan_result.key_field,
+            scan_result=scan_result,
+            state_store=state_store,
+            console=console,
+            resume=resume,
+            batch_size=config.copy_batch_size,
+            max_parallelism=config.copy_parallelism,
+        )
     
     return 0 if failure == 0 else 1
 

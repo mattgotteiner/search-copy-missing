@@ -6,6 +6,7 @@ from typing import Optional
 from azure.core.credentials import AzureKeyCredential
 from azure.identity import DefaultAzureCredential
 from azure.search.documents import SearchClient
+from azure.search.documents.aio import SearchClient as AsyncSearchClient
 from azure.search.documents.indexes import SearchIndexClient
 
 from .config import ServiceConfig
@@ -46,6 +47,17 @@ class ClientFactory:
         """Create a SearchClient for document operations."""
         credential = self._get_credential(service)
         return SearchClient(
+            endpoint=service.endpoint,
+            index_name=index_name,
+            credential=credential,
+        )
+
+    def create_async_search_client(
+        self, service: ServiceConfig, index_name: str
+    ) -> AsyncSearchClient:
+        """Create an async SearchClient for document operations."""
+        credential = self._get_credential(service)
+        return AsyncSearchClient(
             endpoint=service.endpoint,
             index_name=index_name,
             credential=credential,

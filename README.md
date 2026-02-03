@@ -14,6 +14,21 @@ A focused tool to find and copy missing documents between Azure AI Search indexe
 pip install -r requirements.txt
 ```
 
+## Running
+
+From the `copy-missing` directory:
+
+```powershell
+# Option 1: Reference the src module directly
+python -m src.copy_missing <command>
+
+# Option 2: Set PYTHONPATH (PowerShell)
+$env:PYTHONPATH = "src"; python -m copy_missing <command>
+
+# Option 3: Set PYTHONPATH (bash)
+PYTHONPATH=src python -m copy_missing <command>
+```
+
 ## Configuration
 
 Set these environment variables (or create a `.env` file):
@@ -35,7 +50,7 @@ Set these environment variables (or create a `.env` file):
 ### 1. Scan for missing documents
 
 ```bash
-python -m copy_missing scan --index my-index --partitions 8
+python -m src.copy_missing scan --index my-index --partitions 8
 ```
 
 This will:
@@ -47,7 +62,7 @@ This will:
 ### 2. Copy missing documents
 
 ```bash
-python -m copy_missing copy --index my-index
+python -m src.copy_missing copy --index my-index
 ```
 
 This will:
@@ -61,7 +76,7 @@ This will:
 If copy is interrupted, just run the same command again:
 
 ```bash
-python -m copy_missing copy --index my-index
+python -m src.copy_missing copy --index my-index
 ```
 
 It will skip already-copied documents and resume from where it left off.
@@ -69,7 +84,7 @@ It will skip already-copied documents and resume from where it left off.
 To start fresh instead of resuming:
 
 ```bash
-python -m copy_missing copy --index my-index --no-resume
+python -m src.copy_missing copy --index my-index --no-resume
 ```
 
 ## Output Files

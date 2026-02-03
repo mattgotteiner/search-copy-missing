@@ -2,10 +2,10 @@
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -13,6 +13,7 @@ class MissingDoc:
     """A document ID that is missing from the destination."""
     id: str
     partition_id: int
+    timestamp: str  # ISO format - value of the timestamp field for this doc
 
 
 @dataclass
@@ -43,14 +44,21 @@ class ScanResult:
             "dest_endpoint": self.dest_endpoint,
             "partition_count": self.partition_count,
             "total_scanned": self.total_scanned,
-            "missing_docs": [asdict(doc) for doc in self.missing_docs],
+            "missing_docs": [
+                {"id": doc.id, "partition_id": doc.partition_id, "timestamp": doc.timestamp}
+                for doc in self.missing_docs
+            ],
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "ScanResult":
         """Create from dictionary loaded from JSON."""
         missing_docs = [
-            MissingDoc(id=doc["id"], partition_id=doc["partition_id"])
+            MissingDoc(
+                id=doc["id"],
+                partition_id=doc["partition_id"],
+                timestamp=doc.get("timestamp", ""),  # Backwards compatible
+            )
             for doc in data.get("missing_docs", [])
         ]
         return cls(
@@ -71,15 +79,26 @@ class CopyProgress:
     """Progress of a copy operation (for resume support)."""
     index_name: str
     scan_timestamp: str  # Links to original scan
-    copied_ids: List[str] = field(default_factory=list)
-    failed_ids: List[str] = field(default_factory=list)
+    # Per-partition progress: partition_id (as string) -> last copied timestamp
+    partition_timestamps: Dict[str, str] = field(default_factory=dict)
+    copied_count: int = 0
+    failed_count: int = 0
+
+    def get_partition_timestamp(self, partition_id: int) -> Optional[str]:
+        """Get the last copied timestamp for a partition."""
+        return self.partition_timestamps.get(str(partition_id))
+
+    def set_partition_timestamp(self, partition_id: int, timestamp: str) -> None:
+        """Set the last copied timestamp for a partition."""
+        self.partition_timestamps[str(partition_id)] = timestamp
 
     def to_dict(self) -> dict:
         return {
             "index_name": self.index_name,
             "scan_timestamp": self.scan_timestamp,
-            "copied_ids": self.copied_ids,
-            "failed_ids": self.failed_ids,
+            "partition_timestamps": self.partition_timestamps,
+            "copied_count": self.copied_count,
+            "failed_count": self.failed_count,
         }
 
     @classmethod
@@ -87,8 +106,9 @@ class CopyProgress:
         return cls(
             index_name=data["index_name"],
             scan_timestamp=data["scan_timestamp"],
-            copied_ids=data.get("copied_ids", []),
-            failed_ids=data.get("failed_ids", []),
+            partition_timestamps=data.get("partition_timestamps", {}),
+            copied_count=data.get("copied_count", 0),
+            failed_count=data.get("failed_count", 0),
         )
 
 

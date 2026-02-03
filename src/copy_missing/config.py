@@ -24,6 +24,8 @@ class AppConfig:
     state_dir: str
     desired_partitions: int
     index_name: Optional[str]
+    copy_parallelism: Optional[int]  # None means all partitions in parallel
+    copy_batch_size: int  # Number of docs to copy at a time
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -48,6 +50,9 @@ class AppConfig:
         state_dir = os.environ.get("STATE_DIR", "state")
         desired_partitions = int(os.environ.get("DESIRED_PARTITIONS", "8"))
         index_name = os.environ.get("INDEX_NAME")
+        copy_parallelism_str = os.environ.get("COPY_PARALLELISM")
+        copy_parallelism = int(copy_parallelism_str) if copy_parallelism_str else None
+        copy_batch_size = int(os.environ.get("COPY_BATCH_SIZE", "250"))
 
         return cls(
             source=ServiceConfig(endpoint=source_endpoint, admin_key=source_key),
@@ -57,4 +62,6 @@ class AppConfig:
             state_dir=state_dir,
             desired_partitions=desired_partitions,
             index_name=index_name,
+            copy_parallelism=copy_parallelism,
+            copy_batch_size=copy_batch_size,
         )
