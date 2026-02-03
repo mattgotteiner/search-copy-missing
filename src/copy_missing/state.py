@@ -1,0 +1,143 @@
+"""State persistence for scan results."""
+
+import json
+import os
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+
+
+@dataclass
+class MissingDoc:
+    """A document ID that is missing from the destination."""
+    id: str
+    partition_id: int
+
+
+@dataclass
+class ScanResult:
+    """Result of a scan operation."""
+    index_name: str
+    timestamp: str  # ISO format
+    timestamp_field: str
+    key_field: str
+    source_endpoint: str
+    dest_endpoint: str
+    partition_count: int
+    total_scanned: int
+    missing_docs: List[MissingDoc] = field(default_factory=list)
+
+    @property
+    def missing_count(self) -> int:
+        return len(self.missing_docs)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "index_name": self.index_name,
+            "timestamp": self.timestamp,
+            "timestamp_field": self.timestamp_field,
+            "key_field": self.key_field,
+            "source_endpoint": self.source_endpoint,
+            "dest_endpoint": self.dest_endpoint,
+            "partition_count": self.partition_count,
+            "total_scanned": self.total_scanned,
+            "missing_docs": [asdict(doc) for doc in self.missing_docs],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ScanResult":
+        """Create from dictionary loaded from JSON."""
+        missing_docs = [
+            MissingDoc(id=doc["id"], partition_id=doc["partition_id"])
+            for doc in data.get("missing_docs", [])
+        ]
+        return cls(
+            index_name=data["index_name"],
+            timestamp=data["timestamp"],
+            timestamp_field=data["timestamp_field"],
+            key_field=data["key_field"],
+            source_endpoint=data["source_endpoint"],
+            dest_endpoint=data["dest_endpoint"],
+            partition_count=data["partition_count"],
+            total_scanned=data["total_scanned"],
+            missing_docs=missing_docs,
+        )
+
+
+@dataclass
+class CopyProgress:
+    """Progress of a copy operation (for resume support)."""
+    index_name: str
+    scan_timestamp: str  # Links to original scan
+    copied_ids: List[str] = field(default_factory=list)
+    failed_ids: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "index_name": self.index_name,
+            "scan_timestamp": self.scan_timestamp,
+            "copied_ids": self.copied_ids,
+            "failed_ids": self.failed_ids,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CopyProgress":
+        return cls(
+            index_name=data["index_name"],
+            scan_timestamp=data["scan_timestamp"],
+            copied_ids=data.get("copied_ids", []),
+            failed_ids=data.get("failed_ids", []),
+        )
+
+
+class StateStore:
+    """JSON-based state persistence."""
+
+    def __init__(self, state_dir: str):
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def _scan_path(self, index_name: str) -> Path:
+        return self.state_dir / f"{index_name}_missing.json"
+
+    def _copy_path(self, index_name: str) -> Path:
+        return self.state_dir / f"{index_name}_copy_progress.json"
+
+    def write_scan(self, result: ScanResult) -> Path:
+        """Write scan result to JSON file."""
+        path = self._scan_path(result.index_name)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(result.to_dict(), f, indent=2)
+        return path
+
+    def read_scan(self, index_name: str) -> Optional[ScanResult]:
+        """Read scan result from JSON file."""
+        path = self._scan_path(index_name)
+        if not path.exists():
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return ScanResult.from_dict(data)
+
+    def write_copy_progress(self, progress: CopyProgress) -> None:
+        """Write copy progress to JSON file."""
+        path = self._copy_path(progress.index_name)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(progress.to_dict(), f, indent=2)
+
+    def read_copy_progress(self, index_name: str) -> Optional[CopyProgress]:
+        """Read copy progress from JSON file."""
+        path = self._copy_path(index_name)
+        if not path.exists():
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return CopyProgress.from_dict(data)
+
+    def clear_copy_progress(self, index_name: str) -> None:
+        """Remove copy progress file after successful completion."""
+        path = self._copy_path(index_name)
+        if path.exists():
+            path.unlink()
