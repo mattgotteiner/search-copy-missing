@@ -75,6 +75,79 @@ class ScanResult:
 
 
 @dataclass
+class FailedDoc:
+    """A document that failed to copy."""
+    id: str
+    partition_id: int
+    error: str
+    timestamp: str  # When the failure occurred (ISO format)
+
+
+@dataclass
+class FailureLog:
+    """Durable log of failed document copies."""
+    index_name: str
+    scan_timestamp: str  # Links to original scan
+    failures: List[FailedDoc] = field(default_factory=list)
+
+    def add_failure(self, doc_id: str, partition_id: int, error: str) -> None:
+        """Add a failed document to the log."""
+        self.failures.append(FailedDoc(
+            id=doc_id,
+            partition_id=partition_id,
+            error=error,
+            timestamp=datetime.utcnow().isoformat() + "Z",
+        ))
+
+    def add_failures(self, doc_ids: List[str], partition_id: int, error: str) -> None:
+        """Add multiple failed documents with the same error."""
+        ts = datetime.utcnow().isoformat() + "Z"
+        for doc_id in doc_ids:
+            self.failures.append(FailedDoc(
+                id=doc_id,
+                partition_id=partition_id,
+                error=error,
+                timestamp=ts,
+            ))
+
+    @property
+    def failure_count(self) -> int:
+        return len(self.failures)
+
+    def to_dict(self) -> dict:
+        return {
+            "index_name": self.index_name,
+            "scan_timestamp": self.scan_timestamp,
+            "failures": [
+                {
+                    "id": f.id,
+                    "partition_id": f.partition_id,
+                    "error": f.error,
+                    "timestamp": f.timestamp,
+                }
+                for f in self.failures
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FailureLog":
+        failures = [
+            FailedDoc(
+                id=f["id"],
+                partition_id=f["partition_id"],
+                error=f["error"],
+                timestamp=f["timestamp"],
+            )
+            for f in data.get("failures", [])
+        ]
+        return cls(
+            index_name=data["index_name"],
+            scan_timestamp=data["scan_timestamp"],
+            failures=failures,
+        )
+
+
+@dataclass
 class CopyProgress:
     """Progress of a copy operation (for resume support)."""
     index_name: str
@@ -125,11 +198,16 @@ class StateStore:
     def _copy_path(self, index_name: str) -> Path:
         return self.state_dir / f"{index_name}_copy_progress.json"
 
+    def _failure_path(self, index_name: str) -> Path:
+        return self.state_dir / f"{index_name}_failures.json"
+
     def write_scan(self, result: ScanResult) -> Path:
-        """Write scan result to JSON file."""
+        """Write scan result to JSON file (atomic write)."""
         path = self._scan_path(result.index_name)
-        with open(path, "w", encoding="utf-8") as f:
+        temp_path = path.with_suffix(".json.tmp")
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(result.to_dict(), f, indent=2)
+        temp_path.replace(path)
         return path
 
     def read_scan(self, index_name: str) -> Optional[ScanResult]:
@@ -142,10 +220,12 @@ class StateStore:
         return ScanResult.from_dict(data)
 
     def write_copy_progress(self, progress: CopyProgress) -> None:
-        """Write copy progress to JSON file."""
+        """Write copy progress to JSON file (atomic write)."""
         path = self._copy_path(progress.index_name)
-        with open(path, "w", encoding="utf-8") as f:
+        temp_path = path.with_suffix(".json.tmp")
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(progress.to_dict(), f, indent=2)
+        temp_path.replace(path)
 
     def read_copy_progress(self, index_name: str) -> Optional[CopyProgress]:
         """Read copy progress from JSON file."""
@@ -159,5 +239,34 @@ class StateStore:
     def clear_copy_progress(self, index_name: str) -> None:
         """Remove copy progress file after successful completion."""
         path = self._copy_path(index_name)
+        if path.exists():
+            path.unlink()
+
+    def write_failure_log(self, log: FailureLog) -> Path:
+        """Write failure log to JSON file (atomic write)."""
+        path = self._failure_path(log.index_name)
+        temp_path = path.with_suffix(".json.tmp")
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(log.to_dict(), f, indent=2)
+        temp_path.replace(path)
+        return path
+
+    def read_failure_log(self, index_name: str) -> Optional[FailureLog]:
+        """Read failure log from JSON file."""
+        path = self._failure_path(index_name)
+        if not path.exists():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return FailureLog.from_dict(data)
+        except json.JSONDecodeError:
+            # Corrupted file, remove it and start fresh
+            path.unlink()
+            return None
+
+    def clear_failure_log(self, index_name: str) -> None:
+        """Remove failure log file."""
+        path = self._failure_path(index_name)
         if path.exists():
             path.unlink()

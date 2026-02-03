@@ -22,7 +22,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from .state import CopyProgress, MissingDoc, ScanResult, StateStore
+from .state import CopyProgress, FailureLog, MissingDoc, ScanResult, StateStore
 
 T = TypeVar("T")
 
@@ -115,6 +115,8 @@ async def copy_batch(
     dest_client: SearchClient,
     key_field: str,
     doc_ids: List[str],
+    partition_id: int,
+    failure_log: FailureLog,
     console: Console,
 ) -> tuple[int, int]:
     """
@@ -124,19 +126,48 @@ async def copy_batch(
     success_count = 0
     failure_count = 0
     
-    # Fetch all documents in batch
+    if not doc_ids:
+        return success_count, failure_count
+    
+    # Fetch all documents in a single search using search.in filter
     docs = []
-    for doc_id in doc_ids:
-        try:
-            doc = await retry_with_backoff(
-                f"Fetch {doc_id}",
-                lambda did=doc_id: source_client.get_document(key=did),
-                console,
+    try:
+        # Doc IDs only contain alphanumeric, dash, underscore, equals - no escaping needed
+        # See: https://learn.microsoft.com/en-us/rest/api/searchservice/naming-rules
+        ids_string = ",".join(doc_ids)
+        filter_expr = f"search.in({key_field}, '{ids_string}', ',')"
+        
+        async def fetch_batch():
+            results = []
+            search_results = await source_client.search(
+                search_text="*",
+                filter=filter_expr,
+                top=len(doc_ids),
             )
-            docs.append(doc)
-        except Exception as exc:
-            console.print(f"[red]Failed to fetch {doc_id}: {exc}[/red]")
-            failure_count += 1
+            async for doc in search_results:
+                results.append(doc)
+            return results
+        
+        docs = await retry_with_backoff(
+            f"Fetch batch of {len(doc_ids)}",
+            fetch_batch,
+            console,
+        )
+        
+        # Track any IDs not found
+        found_ids = {doc[key_field] for doc in docs}
+        missing_ids = list(set(doc_ids) - found_ids)
+        if missing_ids:
+            console.print(f"[yellow]Warning: {len(missing_ids)} documents not found in source[/yellow]")
+            failure_log.add_failures(missing_ids, partition_id, "Document not found in source")
+            failure_count += len(missing_ids)
+            
+    except Exception as exc:
+        error_msg = str(exc)
+        console.print(f"[red]Failed to fetch batch: {exc}[/red]")
+        failure_log.add_failures(doc_ids, partition_id, f"Fetch failed: {error_msg}")
+        failure_count += len(doc_ids)
+        return success_count, failure_count
     
     if not docs:
         return success_count, failure_count
@@ -150,7 +181,10 @@ async def copy_batch(
         )
         success_count = len(docs)
     except Exception as exc:
+        error_msg = str(exc)
         console.print(f"[red]Failed to upload batch: {exc}[/red]")
+        uploaded_ids = [doc[key_field] for doc in docs]
+        failure_log.add_failures(uploaded_ids, partition_id, f"Upload failed: {error_msg}")
         failure_count += len(docs)
     
     return success_count, failure_count
@@ -163,6 +197,7 @@ async def copy_partition(
     partition_id: int,
     docs: List[MissingDoc],
     progress_state: CopyProgress,
+    failure_log: FailureLog,
     state_store: StateStore,
     state_lock: asyncio.Lock,
     console: Console,
@@ -205,6 +240,8 @@ async def copy_partition(
                 dest_client,
                 key_field,
                 batch_ids,
+                partition_id,
+                failure_log,
                 console,
             )
             
@@ -218,8 +255,10 @@ async def copy_partition(
                 if batch_success > 0:
                     progress_state.set_partition_timestamp(partition_id, batch_docs[-1].timestamp)
                 
-                # Persist progress
+                # Persist progress and failure log
                 state_store.write_copy_progress(progress_state)
+                if failure_log.failure_count > 0:
+                    state_store.write_failure_log(failure_log)
             
             progress.update(task_id, advance=len(batch_docs))
             progress.update(overall_task_id, advance=len(batch_docs))
@@ -268,6 +307,14 @@ async def copy_missing_docs(
     
     if progress_state is None:
         progress_state = CopyProgress(
+            index_name=index_name,
+            scan_timestamp=scan_result.timestamp,
+        )
+    
+    # Load or create failure log
+    failure_log = state_store.read_failure_log(index_name)
+    if failure_log is None or failure_log.scan_timestamp != scan_result.timestamp:
+        failure_log = FailureLog(
             index_name=index_name,
             scan_timestamp=scan_result.timestamp,
         )
@@ -327,6 +374,7 @@ async def copy_missing_docs(
                 partition_id,
                 docs,
                 progress_state,
+                failure_log,
                 state_store,
                 state_lock,
                 console,
@@ -353,6 +401,10 @@ async def copy_missing_docs(
     # Clear progress file if all succeeded
     if progress_state.failed_count == 0:
         state_store.clear_copy_progress(index_name)
+        state_store.clear_failure_log(index_name)
         console.print("  Progress file cleared")
+    else:
+        failure_path = state_store.write_failure_log(failure_log)
+        console.print(f"  [yellow]Failure log: {failure_path}[/yellow]")
     
     return progress_state.copied_count, progress_state.failed_count
