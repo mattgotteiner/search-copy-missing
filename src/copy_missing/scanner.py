@@ -23,6 +23,73 @@ from .state import MissingDoc, ScanResult
 
 
 @dataclass
+class RebalancedPartition:
+    """A partition with document count information for balanced distribution."""
+    id: int
+    start: str  # ISO timestamp of first doc
+    end: str    # ISO timestamp of last doc
+    count: int  # Number of documents in this partition
+
+
+def rebalance_by_count(
+    docs: List[MissingDoc],
+    num_partitions: int,
+) -> Tuple[dict[int, List[MissingDoc]], List[RebalancedPartition]]:
+    """
+    Rebalance documents into partitions with roughly equal document counts.
+    
+    Instead of using the scan-time partition_id (which is based on equal time slices),
+    this redistributes documents so each partition has approximately the same number
+    of documents, improving parallel copy performance.
+    
+    Args:
+        docs: List of missing documents from scan result
+        num_partitions: Desired number of partitions
+        
+    Returns:
+        Tuple of:
+        - Dict mapping new partition_id -> list of documents
+        - List of RebalancedPartition metadata for persistence
+    """
+    if not docs:
+        return {}, []
+    
+    # Sort all documents by timestamp for ordered chunking
+    sorted_docs = sorted(docs, key=lambda d: d.timestamp)
+    
+    # Calculate target docs per partition
+    total_docs = len(sorted_docs)
+    base_size = total_docs // num_partitions
+    remainder = total_docs % num_partitions
+    
+    docs_by_partition: dict[int, List[MissingDoc]] = {}
+    partition_metadata: List[RebalancedPartition] = []
+    
+    start_idx = 0
+    for partition_id in range(num_partitions):
+        # Distribute remainder across first partitions
+        partition_size = base_size + (1 if partition_id < remainder else 0)
+        
+        if partition_size == 0:
+            continue
+            
+        end_idx = start_idx + partition_size
+        partition_docs = sorted_docs[start_idx:end_idx]
+        
+        docs_by_partition[partition_id] = partition_docs
+        partition_metadata.append(RebalancedPartition(
+            id=partition_id,
+            start=partition_docs[0].timestamp,
+            end=partition_docs[-1].timestamp,
+            count=len(partition_docs),
+        ))
+        
+        start_idx = end_idx
+    
+    return docs_by_partition, partition_metadata
+
+
+@dataclass
 class Partition:
     """A time-based partition of the index."""
     id: int

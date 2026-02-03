@@ -22,13 +22,59 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from .state import CopyProgress, FailureLog, MissingDoc, ScanResult, StateStore
+from .state import CopyProgress, FailureLog, MissingDoc, RebalancedPartitionInfo, ScanResult, StateStore
+from .scanner import rebalance_by_count, RebalancedPartition
 
 T = TypeVar("T")
 
 # Retry configuration
 RETRY_MAX_ATTEMPTS = 5
 RETRY_BASE_DELAY = 2.0
+RETRY_MAX_DELAY = 60.0
+
+
+def _rebuild_partition_mapping(
+    docs: List[MissingDoc],
+    rebalanced_partitions: Dict[str, RebalancedPartitionInfo],
+) -> Dict[int, List[MissingDoc]]:
+    """
+    Rebuild partition mapping from stored partition boundaries.
+    
+    Used when resuming a copy operation to ensure documents are assigned
+    to the same partitions as when the copy started.
+    
+    Args:
+        docs: All missing documents from scan result
+        rebalanced_partitions: Stored partition boundaries from previous run
+        
+    Returns:
+        Dict mapping partition_id -> list of documents
+    """
+    # Sort partitions by start timestamp
+    sorted_partitions = sorted(
+        rebalanced_partitions.values(),
+        key=lambda p: p.start
+    )
+    
+    # Sort docs by timestamp
+    sorted_docs = sorted(docs, key=lambda d: d.timestamp)
+    
+    docs_by_partition: Dict[int, List[MissingDoc]] = {
+        p.id: [] for p in sorted_partitions
+    }
+    
+    # Assign each doc to its partition based on timestamp boundaries
+    partition_idx = 0
+    for doc in sorted_docs:
+        # Move to next partition if doc is past current partition's end
+        while (partition_idx < len(sorted_partitions) - 1 and 
+               doc.timestamp > sorted_partitions[partition_idx].end):
+            partition_idx += 1
+        
+        partition_id = sorted_partitions[partition_idx].id
+        docs_by_partition[partition_id].append(doc)
+    
+    return docs_by_partition
 RETRY_MAX_DELAY = 60.0
 
 
@@ -319,10 +365,33 @@ async def copy_missing_docs(
             scan_timestamp=scan_result.timestamp,
         )
     
-    # Group documents by partition
-    docs_by_partition: Dict[int, List[MissingDoc]] = defaultdict(list)
-    for doc in scan_result.missing_docs:
-        docs_by_partition[doc.partition_id].append(doc)
+    # Rebalance documents into partitions with equal document counts
+    # This provides better parallelism than the scan-time equal-time-slice partitions
+    if progress_state.rebalanced_partitions is not None:
+        # Resume: rebuild partition mapping from stored boundaries
+        console.print("[dim]Resuming with previously computed partition boundaries[/dim]")
+        docs_by_partition = _rebuild_partition_mapping(
+            scan_result.missing_docs,
+            progress_state.rebalanced_partitions,
+        )
+    else:
+        # Fresh start: compute balanced partitions
+        num_partitions = max_parallelism if max_parallelism else 8
+        docs_by_partition, partition_metadata = rebalance_by_count(
+            scan_result.missing_docs,
+            num_partitions,
+        )
+        # Store partition metadata in progress state for resume
+        progress_state.rebalanced_partitions = {
+            str(p.id): RebalancedPartitionInfo(
+                id=p.id,
+                start=p.start,
+                end=p.end,
+                count=p.count,
+            )
+            for p in partition_metadata
+        }
+        state_store.write_copy_progress(progress_state)
     
     if not docs_by_partition:
         console.print("[green]No documents to copy[/green]")
@@ -331,8 +400,14 @@ async def copy_missing_docs(
     total_docs = len(scan_result.missing_docs)
     num_partitions = len(docs_by_partition)
     
-    console.print(f"[bold]Copying {total_docs:,} documents across {num_partitions} partitions[/bold]")
+    console.print(f"[bold]Copying {total_docs:,} documents across {num_partitions} partitions (balanced)[/bold]")
     console.print(f"  Batch size: {batch_size}, Parallelism: {max_parallelism or 'unlimited'}")
+    
+    # Show partition distribution
+    for partition_id in sorted(docs_by_partition.keys()):
+        count = len(docs_by_partition[partition_id])
+        console.print(f"    Partition {partition_id}: {count:,} docs")
+    
     if progress_state.copied_count > 0:
         console.print(f"  (resuming, {progress_state.copied_count} already copied)")
     

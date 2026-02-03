@@ -148,6 +148,15 @@ class FailureLog:
 
 
 @dataclass
+class RebalancedPartitionInfo:
+    """Metadata for a rebalanced partition."""
+    id: int
+    start: str  # First doc timestamp
+    end: str    # Last doc timestamp
+    count: int  # Number of documents
+
+
+@dataclass
 class CopyProgress:
     """Progress of a copy operation (for resume support)."""
     index_name: str
@@ -156,6 +165,9 @@ class CopyProgress:
     partition_timestamps: Dict[str, str] = field(default_factory=dict)
     copied_count: int = 0
     failed_count: int = 0
+    # Rebalanced partition definitions (computed at copy start for even distribution)
+    # Maps partition_id (as string) -> partition info
+    rebalanced_partitions: Optional[Dict[str, RebalancedPartitionInfo]] = None
 
     def get_partition_timestamp(self, partition_id: int) -> Optional[str]:
         """Get the last copied timestamp for a partition."""
@@ -166,22 +178,40 @@ class CopyProgress:
         self.partition_timestamps[str(partition_id)] = timestamp
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "index_name": self.index_name,
             "scan_timestamp": self.scan_timestamp,
             "partition_timestamps": self.partition_timestamps,
             "copied_count": self.copied_count,
             "failed_count": self.failed_count,
         }
+        if self.rebalanced_partitions is not None:
+            result["rebalanced_partitions"] = {
+                k: {"id": v.id, "start": v.start, "end": v.end, "count": v.count}
+                for k, v in self.rebalanced_partitions.items()
+            }
+        return result
 
     @classmethod
     def from_dict(cls, data: dict) -> "CopyProgress":
+        rebalanced = None
+        if "rebalanced_partitions" in data:
+            rebalanced = {
+                k: RebalancedPartitionInfo(
+                    id=v["id"],
+                    start=v["start"],
+                    end=v["end"],
+                    count=v["count"],
+                )
+                for k, v in data["rebalanced_partitions"].items()
+            }
         return cls(
             index_name=data["index_name"],
             scan_timestamp=data["scan_timestamp"],
             partition_timestamps=data.get("partition_timestamps", {}),
             copied_count=data.get("copied_count", 0),
             failed_count=data.get("failed_count", 0),
+            rebalanced_partitions=rebalanced,
         )
 
 

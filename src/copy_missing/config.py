@@ -30,7 +30,7 @@ class AppConfig:
     @classmethod
     def from_env(cls) -> "AppConfig":
         """Load configuration from environment variables."""
-        load_dotenv()
+        load_dotenv(override=True)
 
         source_endpoint = os.environ.get("AZURE_SEARCH_SOURCE_ENDPOINT", "")
         source_key = os.environ.get("AZURE_SEARCH_SOURCE_KEY")
