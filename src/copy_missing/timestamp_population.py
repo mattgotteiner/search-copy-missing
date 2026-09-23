@@ -9,6 +9,10 @@ from azure.search.documents.aio import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import SearchField, SearchFieldDataType
 
+DEFAULT_PAGE_SIZE = 1000
+MIN_PAGE_SIZE = 1
+MAX_PAGE_SIZE = 1000
+
 
 def _validate_timestamp_field(
     index_client: SearchIndexClient,
@@ -61,12 +65,18 @@ async def populate_timestamps(
     search_client: SearchClient,
     index_name: str,
     timestamp_field: str,
+    page_size: int = DEFAULT_PAGE_SIZE,
 ) -> int:
     """Add the timestamp field if needed and merge timestamps into documents missing it.
 
     Generated values are synthetic and distributed across the current UTC day. They
     provide a sortable partition key but do not represent document modification times.
     """
+    if not MIN_PAGE_SIZE <= page_size <= MAX_PAGE_SIZE:
+        raise ValueError(
+            f"Page size must be between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
+        )
+
     key_field = _validate_timestamp_field(index_client, index_name, timestamp_field)
     now = datetime.now(timezone.utc)
     start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
@@ -79,6 +89,7 @@ async def populate_timestamps(
         filter=f"{timestamp_field} eq null",
         select=[key_field],
         session_id=session_id,
+        top=page_size,
     )
 
     async for page in results.by_page():

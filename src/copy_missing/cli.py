@@ -12,7 +12,26 @@ from .config import AppConfig
 from .copier import copy_missing_docs
 from .scanner import scan_index
 from .state import StateStore
-from .timestamp_population import populate_timestamps
+from .timestamp_population import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    MIN_PAGE_SIZE,
+    populate_timestamps,
+)
+
+
+def parse_page_size(value: str) -> int:
+    """Parse a Search response page size within Azure AI Search limits."""
+    try:
+        page_size = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("page size must be an integer") from exc
+
+    if not MIN_PAGE_SIZE <= page_size <= MAX_PAGE_SIZE:
+        raise argparse.ArgumentTypeError(
+            f"page size must be between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
+        )
+    return page_size
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -51,6 +70,16 @@ def create_parser() -> argparse.ArgumentParser:
     populate_parser.add_argument(
         "--index", "-i",
         help="Index name (or set INDEX_NAME env var)",
+    )
+    populate_parser.add_argument(
+        "--page-size",
+        type=parse_page_size,
+        default=DEFAULT_PAGE_SIZE,
+        metavar="N",
+        help=(
+            f"Documents per response (valid range: {MIN_PAGE_SIZE}-{MAX_PAGE_SIZE}; "
+            f"default: {DEFAULT_PAGE_SIZE})"
+        ),
     )
     
     # Copy command
@@ -166,6 +195,7 @@ async def run_copy(
 async def run_populate_timestamps(
     config: AppConfig,
     index_name: str,
+    page_size: int,
     console: Console,
 ) -> int:
     """Add synthetic timestamps to documents in the source index that lack them."""
@@ -179,6 +209,7 @@ async def run_populate_timestamps(
                 search_client=search_client,
                 index_name=index_name,
                 timestamp_field=config.timestamp_field,
+                page_size=page_size,
             )
     finally:
         index_client.close()
@@ -220,7 +251,9 @@ def main() -> int:
         return asyncio.run(run_copy(config, index_name, resume, console))
 
     elif args.command == "populate-timestamps":
-        return asyncio.run(run_populate_timestamps(config, index_name, console))
+        return asyncio.run(
+            run_populate_timestamps(config, index_name, args.page_size, console)
+        )
 
     return 0
 

@@ -1,5 +1,6 @@
 """Tests for synthetic timestamp population."""
 
+import argparse
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 from azure.search.documents.indexes.models import SearchFieldDataType
 
+from copy_missing.cli import create_parser, parse_page_size
 from copy_missing.timestamp_population import (
     _random_timestamp,
     _validate_timestamp_field,
@@ -15,6 +17,26 @@ from copy_missing.timestamp_population import (
 
 
 class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
+    def test_page_size_cli_parameter_defaults_to_1000_and_is_configurable(self):
+        parser = create_parser()
+        default_args = parser.parse_args(["populate-timestamps", "--index", "items"])
+        custom_args = parser.parse_args(
+            ["populate-timestamps", "--index", "items", "--page-size", "256"]
+        )
+
+        self.assertEqual(default_args.page_size, 1000)
+        self.assertEqual(custom_args.page_size, 256)
+
+    def test_page_size_rejects_values_outside_supported_range(self):
+        for value in ("0", "1001"):
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    parse_page_size(value)
+
+    def test_page_size_accepts_both_range_boundaries(self):
+        self.assertEqual(parse_page_size("1"), 1)
+        self.assertEqual(parse_page_size("1000"), 1000)
+
     def test_random_timestamp_is_utc_with_millisecond_precision(self):
         start = datetime(2026, 9, 23, tzinfo=timezone.utc)
         end = datetime(2026, 9, 23, 23, 59, 59, 999000, tzinfo=timezone.utc)
@@ -79,7 +101,13 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         index_client = Mock()
         index_client.get_index.return_value = index
 
-        count = await populate_timestamps(index_client, search_client, "items", "createdAt")
+        count = await populate_timestamps(
+            index_client,
+            search_client,
+            "items",
+            "createdAt",
+            page_size=256,
+        )
 
         self.assertEqual(count, 2)
         search_client.search.assert_awaited_once()
@@ -87,6 +115,7 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
             search_client.search.await_args.kwargs["filter"],
             "createdAt eq null",
         )
+        self.assertEqual(search_client.search.await_args.kwargs["top"], 256)
         updates = search_client.merge_documents.await_args.kwargs["documents"]
         self.assertEqual([item["id"] for item in updates], ["one", "two"])
         self.assertTrue(all(item["createdAt"].endswith("Z") for item in updates))

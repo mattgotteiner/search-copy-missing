@@ -94,7 +94,7 @@ If the source index has no suitable timestamp field, or some documents have no
 value for it, populate them before scanning:
 
 ```bash
-python -m src.copy_missing populate-timestamps --index my-index
+python -m src.copy_missing populate-timestamps --index my-index --page-size 1000
 ```
 
 The command adds the configured `TIMESTAMP_FIELD` to the source index as a
@@ -103,6 +103,8 @@ uses partial document merges to fill only missing values. Generated timestamps
 are synthetic, uniformly distributed across the current UTC day, and are not
 actual document creation or modification times. If a timestamp field already
 exists, it must be an `Edm.DateTimeOffset` field that is filterable and sortable.
+`--page-size` sets the number of documents requested per Search response. It
+accepts values from **1 through 1000** and defaults to **1000**.
 
 ## Output Files
 
