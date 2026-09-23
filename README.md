@@ -97,13 +97,14 @@ value for it, populate them before scanning:
 python -m src.copy_missing populate-timestamps --index my-index --page-size 1000
 ```
 
-The command adds the configured `TIMESTAMP_FIELD` to the source index as a
+The command adds the configured `TIMESTAMP_FIELD` to both indexes as a
 filterable and sortable `Edm.DateTimeOffset` field when it does not exist, then
-uses partial document merges to fill only missing values. Generated timestamps
-are synthetic, uniformly distributed across the current UTC day, and are not
-actual document creation or modification times. A document key always maps to
-the same generated timestamp, so retrying stale search results is safe. If a
-timestamp field already exists, it must be an `Edm.DateTimeOffset` field that is
+uses partial document merges to fill only missing source values. The source
+field must be retrievable for scanning. Generated timestamps are synthetic,
+uniformly distributed across the current UTC day, and are not actual document
+creation or modification times. A document key always maps to the same
+generated timestamp, so retrying stale search results is safe. If a timestamp
+field already exists, it must be an `Edm.DateTimeOffset` field that is
 filterable and sortable.
 `--page-size` sets the number of documents requested per Search response. It
 accepts values from **1 through 1000** and defaults to **1000**.

@@ -86,6 +86,27 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
 
         index_client.create_or_update_index.assert_not_called()
 
+    def test_rejects_existing_timestamp_field_that_is_hidden(self):
+        index = SimpleNamespace(
+            fields=[
+                SimpleNamespace(name="id", key=True),
+                SimpleNamespace(
+                    name="createdAt",
+                    type=SearchFieldDataType.DateTimeOffset,
+                    filterable=True,
+                    sortable=True,
+                    hidden=True,
+                ),
+            ]
+        )
+        index_client = Mock()
+        index_client.get_index.return_value = index
+
+        with self.assertRaisesRegex(ValueError, "must be retrievable"):
+            _validate_timestamp_field(index_client, "items", "createdAt")
+
+        index_client.create_or_update_index.assert_not_called()
+
     async def test_merges_only_missing_timestamps(self):
         search_client = AsyncMock()
         search_client.search.side_effect = [
@@ -100,9 +121,15 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         index = SimpleNamespace(fields=[SimpleNamespace(name="id", key=True)])
         index_client = Mock()
         index_client.get_index.return_value = index
+        destination_index = SimpleNamespace(
+            fields=[SimpleNamespace(name="id", key=True)]
+        )
+        destination_index_client = Mock()
+        destination_index_client.get_index.return_value = destination_index
 
         count = await populate_timestamps(
             index_client,
+            destination_index_client,
             search_client,
             "items",
             "createdAt",
@@ -119,6 +146,13 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         updates = search_client.merge_documents.await_args.kwargs["documents"]
         self.assertEqual([item["id"] for item in updates], ["one", "two"])
         self.assertTrue(all(item["createdAt"].endswith("Z") for item in updates))
+        destination_index_client.create_or_update_index.assert_called_once_with(
+            destination_index
+        )
+        self.assertEqual(
+            destination_index.fields[-1].name,
+            "createdAt",
+        )
 
     async def test_retries_stale_results_without_merging_a_document_twice(self):
         search_client = AsyncMock()
@@ -133,6 +167,10 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         index = SimpleNamespace(fields=[SimpleNamespace(name="id", key=True)])
         index_client = Mock()
         index_client.get_index.return_value = index
+        destination_index_client = Mock()
+        destination_index_client.get_index.return_value = SimpleNamespace(
+            fields=[SimpleNamespace(name="id", key=True)]
+        )
 
         with patch(
             "copy_missing.timestamp_population.asyncio.sleep",
@@ -140,6 +178,7 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         ) as sleep:
             count = await populate_timestamps(
                 index_client,
+                destination_index_client,
                 search_client,
                 "items",
                 "createdAt",
@@ -173,9 +212,14 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         index = SimpleNamespace(fields=[SimpleNamespace(name="id", key=True)])
         index_client = Mock()
         index_client.get_index.return_value = index
+        destination_index_client = Mock()
+        destination_index_client.get_index.return_value = SimpleNamespace(
+            fields=[SimpleNamespace(name="id", key=True)]
+        )
 
         await populate_timestamps(
             index_client,
+            destination_index_client,
             search_client,
             "items",
             "createdAt",
@@ -201,9 +245,19 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         index = SimpleNamespace(fields=[SimpleNamespace(name="id", key=True)])
         index_client = Mock()
         index_client.get_index.return_value = index
+        destination_index_client = Mock()
+        destination_index_client.get_index.return_value = SimpleNamespace(
+            fields=[SimpleNamespace(name="id", key=True)]
+        )
 
         with self.assertRaisesRegex(RuntimeError, "invalid field"):
-            await populate_timestamps(index_client, search_client, "items", "createdAt")
+            await populate_timestamps(
+                index_client,
+                destination_index_client,
+                search_client,
+                "items",
+                "createdAt",
+            )
 
 
 async def _async_iter(items):

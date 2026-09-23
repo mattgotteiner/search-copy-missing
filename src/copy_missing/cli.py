@@ -200,19 +200,24 @@ async def run_populate_timestamps(
 ) -> int:
     """Add synthetic timestamps to documents in the source index that lack them."""
     factory = ClientFactory()
-    index_client = factory.create_index_client(config.source)
+    source_index_client = factory.create_index_client(config.source)
+    destination_index_client = None
     try:
+        destination_index_client = factory.create_index_client(config.destination)
         search_client = factory.create_async_search_client(config.source, index_name)
         async with search_client:
             updated_count = await populate_timestamps(
-                index_client=index_client,
+                source_index_client=source_index_client,
+                destination_index_client=destination_index_client,
                 search_client=search_client,
                 index_name=index_name,
                 timestamp_field=config.timestamp_field,
                 page_size=page_size,
             )
     finally:
-        index_client.close()
+        source_index_client.close()
+        if destination_index_client is not None:
+            destination_index_client.close()
 
     console.print(
         f"[green]Populated timestamps on {updated_count:,} documents "

@@ -22,8 +22,9 @@ def _validate_timestamp_field(
     index_client: SearchIndexClient,
     index_name: str,
     field_name: str,
+    require_retrievable: bool = True,
 ) -> str:
-    """Ensure the timestamp field exists with the capabilities required by scan."""
+    """Ensure the timestamp field has the capabilities required by its use."""
     index = index_client.get_index(index_name)
     key_field = next((field for field in index.fields if field.key), None)
     if key_field is None:
@@ -53,6 +54,11 @@ def _validate_timestamp_field(
                 f"Field '{field_name}' in index '{index_name}' must be filterable "
                 "and sortable; update the index definition before populating it"
             )
+        if require_retrievable and getattr(timestamp_field, "hidden", False):
+            raise ValueError(
+                f"Field '{field_name}' in index '{index_name}' must be retrievable "
+                "for timestamp scanning; update the index definition"
+            )
 
     return key_field.name
 
@@ -67,7 +73,8 @@ def _timestamp_for_key(key: str, start: datetime, end: datetime) -> str:
 
 
 async def populate_timestamps(
-    index_client: SearchIndexClient,
+    source_index_client: SearchIndexClient,
+    destination_index_client: SearchIndexClient,
     search_client: SearchClient,
     index_name: str,
     timestamp_field: str,
@@ -83,7 +90,15 @@ async def populate_timestamps(
             f"Page size must be between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
         )
 
-    key_field = _validate_timestamp_field(index_client, index_name, timestamp_field)
+    key_field = _validate_timestamp_field(
+        source_index_client, index_name, timestamp_field
+    )
+    _validate_timestamp_field(
+        destination_index_client,
+        index_name,
+        timestamp_field,
+        require_retrievable=False,
+    )
     now = datetime.now(timezone.utc)
     start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
     end = datetime.combine(now.date(), time.max, tzinfo=timezone.utc)
