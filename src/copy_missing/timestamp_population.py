@@ -1,5 +1,6 @@
 """Populate missing synthetic timestamps in an Azure AI Search index."""
 
+import asyncio
 import random
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
@@ -12,6 +13,8 @@ from azure.search.documents.indexes.models import SearchField, SearchFieldDataTy
 DEFAULT_PAGE_SIZE = 1000
 MIN_PAGE_SIZE = 1
 MAX_PAGE_SIZE = 1000
+MAX_NO_PROGRESS_RETRIES = 30
+NO_PROGRESS_RETRY_DELAY = 0.5
 
 
 def _validate_timestamp_field(
@@ -81,49 +84,74 @@ async def populate_timestamps(
     now = datetime.now(timezone.utc)
     start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
     end = datetime.combine(now.date(), time.max, tzinfo=timezone.utc)
-    session_id = str(uuid4())
     updated_count = 0
 
-    results = await search_client.search(
-        search_text="*",
-        filter=f"{timestamp_field} eq null",
-        select=[key_field],
-        session_id=session_id,
-        top=page_size,
-    )
+    processed_keys: set[str] = set()
+    no_progress_retries = 0
 
-    async for page in results.by_page():
-        updates: list[dict[str, Any]] = []
-        async for document in page:
-            key = document.get(key_field)
-            if key is None:
-                raise ValueError(
-                    f"Document in index '{index_name}' is missing key field '{key_field}'"
+    while True:
+        results = await search_client.search(
+            search_text="*",
+            filter=f"{timestamp_field} eq null",
+            select=[key_field],
+            session_id=str(uuid4()),
+            top=page_size,
+        )
+        found_count = 0
+        batch_count = 0
+
+        async for page in results.by_page():
+            updates: list[dict[str, Any]] = []
+            async for document in page:
+                found_count += 1
+                key = document.get(key_field)
+                if key is None:
+                    raise ValueError(
+                        f"Document in index '{index_name}' is missing key field '{key_field}'"
+                    )
+                if key in processed_keys:
+                    continue
+                updates.append(
+                    {
+                        key_field: key,
+                        timestamp_field: _random_timestamp(start, end),
+                    }
                 )
-            updates.append(
-                {
-                    key_field: key,
-                    timestamp_field: _random_timestamp(start, end),
-                }
-            )
 
-        if not updates:
-            continue
+            if not updates:
+                continue
 
-        indexing_results = await search_client.merge_documents(documents=updates)
-        if len(indexing_results) != len(updates):
-            raise RuntimeError(
-                f"Expected {len(updates)} indexing results but received "
-                f"{len(indexing_results)}"
-            )
-        failures = [result for result in indexing_results if not result.succeeded]
-        if failures:
-            details = "; ".join(
-                f"{result.key}: {result.error_message}" for result in failures[:5]
-            )
-            raise RuntimeError(
-                f"Failed to populate timestamps on {len(failures)} documents: {details}"
-            )
-        updated_count += len(indexing_results)
+            indexing_results = await search_client.merge_documents(documents=updates)
+            if len(indexing_results) != len(updates):
+                raise RuntimeError(
+                    f"Expected {len(updates)} indexing results but received "
+                    f"{len(indexing_results)}"
+                )
+            failures = [result for result in indexing_results if not result.succeeded]
+            if failures:
+                details = "; ".join(
+                    f"{result.key}: {result.error_message}" for result in failures[:5]
+                )
+                raise RuntimeError(
+                    f"Failed to populate timestamps on {len(failures)} documents: {details}"
+                )
+
+            processed_keys.update(result.key for result in indexing_results)
+            batch_count += len(indexing_results)
+
+        updated_count = len(processed_keys)
+        if found_count == 0:
+            break
+        if batch_count == 0:
+            no_progress_retries += 1
+            if no_progress_retries >= MAX_NO_PROGRESS_RETRIES:
+                raise RuntimeError(
+                    "Search continued returning documents already processed for "
+                    f"timestamp field '{timestamp_field}' after "
+                    f"{MAX_NO_PROGRESS_RETRIES} retries"
+                )
+            await asyncio.sleep(NO_PROGRESS_RETRY_DELAY)
+        else:
+            no_progress_retries = 0
 
     return updated_count

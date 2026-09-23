@@ -4,7 +4,7 @@ import argparse
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from azure.search.documents.indexes.models import SearchFieldDataType
 
@@ -86,12 +86,11 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         index_client.create_or_update_index.assert_not_called()
 
     async def test_merges_only_missing_timestamps(self):
-        page = AsyncMock()
-        page.__aiter__.return_value = iter([{"id": "one"}, {"id": "two"}])
-        paged_results = Mock()
-        paged_results.by_page.return_value = _async_iter([page])
         search_client = AsyncMock()
-        search_client.search.return_value = paged_results
+        search_client.search.side_effect = [
+            _search_results([{"id": "one"}, {"id": "two"}]),
+            _search_results(),
+        ]
         search_client.merge_documents.return_value = [
             SimpleNamespace(succeeded=True, key="one", error_message=None),
             SimpleNamespace(succeeded=True, key="two", error_message=None),
@@ -110,23 +109,50 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(count, 2)
-        search_client.search.assert_awaited_once()
+        self.assertEqual(search_client.search.await_count, 2)
         self.assertEqual(
-            search_client.search.await_args.kwargs["filter"],
+            search_client.search.await_args_list[0].kwargs["filter"],
             "createdAt eq null",
         )
-        self.assertEqual(search_client.search.await_args.kwargs["top"], 256)
+        self.assertEqual(search_client.search.await_args_list[0].kwargs["top"], 256)
         updates = search_client.merge_documents.await_args.kwargs["documents"]
         self.assertEqual([item["id"] for item in updates], ["one", "two"])
         self.assertTrue(all(item["createdAt"].endswith("Z") for item in updates))
 
-    async def test_reports_partial_indexing_failures(self):
-        page = AsyncMock()
-        page.__aiter__.return_value = iter([{"id": "one"}])
-        paged_results = Mock()
-        paged_results.by_page.return_value = _async_iter([page])
+    async def test_retries_stale_results_without_merging_a_document_twice(self):
         search_client = AsyncMock()
-        search_client.search.return_value = paged_results
+        search_client.search.side_effect = [
+            _search_results([{"id": "one"}]),
+            _search_results([{"id": "one"}]),
+            _search_results(),
+        ]
+        search_client.merge_documents.return_value = [
+            SimpleNamespace(succeeded=True, key="one", error_message=None)
+        ]
+        index = SimpleNamespace(fields=[SimpleNamespace(name="id", key=True)])
+        index_client = Mock()
+        index_client.get_index.return_value = index
+
+        with patch(
+            "copy_missing.timestamp_population.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep:
+            count = await populate_timestamps(
+                index_client,
+                search_client,
+                "items",
+                "createdAt",
+                page_size=1,
+            )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(search_client.search.await_count, 3)
+        search_client.merge_documents.assert_awaited_once()
+        sleep.assert_awaited_once_with(0.5)
+
+    async def test_reports_partial_indexing_failures(self):
+        search_client = AsyncMock()
+        search_client.search.return_value = _search_results([{"id": "one"}])
         search_client.merge_documents.return_value = [
             SimpleNamespace(succeeded=False, key="one", error_message="invalid field")
         ]
@@ -141,6 +167,12 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
 async def _async_iter(items):
     for item in items:
         yield item
+
+
+def _search_results(*pages):
+    return SimpleNamespace(
+        by_page=lambda: _async_iter([_async_iter(page) for page in pages])
+    )
 
 
 if __name__ == "__main__":
