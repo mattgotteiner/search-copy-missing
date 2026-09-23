@@ -12,6 +12,26 @@ from .config import AppConfig
 from .copier import copy_missing_docs
 from .scanner import scan_index
 from .state import StateStore
+from .timestamp_population import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    MIN_PAGE_SIZE,
+    populate_timestamps,
+)
+
+
+def parse_page_size(value: str) -> int:
+    """Parse a Search response page size within Azure AI Search limits."""
+    try:
+        page_size = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("page size must be an integer") from exc
+
+    if not MIN_PAGE_SIZE <= page_size <= MAX_PAGE_SIZE:
+        raise argparse.ArgumentTypeError(
+            f"page size must be between {MIN_PAGE_SIZE} and {MAX_PAGE_SIZE}"
+        )
+    return page_size
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -40,6 +60,26 @@ def create_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument(
         "--state-dir", "-s",
         help="Directory to store scan results (or set STATE_DIR env var)",
+    )
+
+    # Populate timestamps command
+    populate_parser = subparsers.add_parser(
+        "populate-timestamps",
+        help="Add a timestamp field and populate documents that do not have one",
+    )
+    populate_parser.add_argument(
+        "--index", "-i",
+        help="Index name (or set INDEX_NAME env var)",
+    )
+    populate_parser.add_argument(
+        "--page-size",
+        type=parse_page_size,
+        default=DEFAULT_PAGE_SIZE,
+        metavar="N",
+        help=(
+            f"Documents per response (valid range: {MIN_PAGE_SIZE}-{MAX_PAGE_SIZE}; "
+            f"default: {DEFAULT_PAGE_SIZE})"
+        ),
     )
     
     # Copy command
@@ -152,6 +192,40 @@ async def run_copy(
     return 0 if failure == 0 else 1
 
 
+async def run_populate_timestamps(
+    config: AppConfig,
+    index_name: str,
+    page_size: int,
+    console: Console,
+) -> int:
+    """Add synthetic timestamps to documents in the source index that lack them."""
+    factory = ClientFactory()
+    source_index_client = factory.create_index_client(config.source)
+    destination_index_client = None
+    try:
+        destination_index_client = factory.create_index_client(config.destination)
+        search_client = factory.create_async_search_client(config.source, index_name)
+        async with search_client:
+            updated_count = await populate_timestamps(
+                source_index_client=source_index_client,
+                destination_index_client=destination_index_client,
+                search_client=search_client,
+                index_name=index_name,
+                timestamp_field=config.timestamp_field,
+                page_size=page_size,
+            )
+    finally:
+        source_index_client.close()
+        if destination_index_client is not None:
+            destination_index_client.close()
+
+    console.print(
+        f"[green]Populated timestamps on {updated_count:,} documents "
+        f"in index '{index_name}'[/green]"
+    )
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     console = Console()
@@ -180,7 +254,12 @@ def main() -> int:
     elif args.command == "copy":
         resume = not args.no_resume
         return asyncio.run(run_copy(config, index_name, resume, console))
-    
+
+    elif args.command == "populate-timestamps":
+        return asyncio.run(
+            run_populate_timestamps(config, index_name, args.page_size, console)
+        )
+
     return 0
 
 

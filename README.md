@@ -6,6 +6,7 @@ A focused tool to find and copy missing documents between Azure AI Search indexe
 
 - **Scan mode**: Parallel partition scanning using timestamp strategy to find docs missing from destination
 - **Copy mode**: Serial document copying with retry and resume support
+- **Timestamp population**: Add and populate a synthetic timestamp field for documents missing one
 - **Persistence**: JSON-based storage of missing doc IDs for later copying
 
 ## Installation
@@ -39,7 +40,7 @@ Set these environment variables (or create a `.env` file):
 | `AZURE_SEARCH_SOURCE_KEY` | No | Source admin key (uses DefaultAzureCredential if not set) |
 | `AZURE_SEARCH_DEST_ENDPOINT` | Yes | Destination Azure Search service URL |
 | `AZURE_SEARCH_DEST_KEY` | No | Destination admin key (uses DefaultAzureCredential if not set) |
-| `TIMESTAMP_FIELD` | Yes | Field name containing document timestamps |
+| `TIMESTAMP_FIELD` | Yes | Field name containing document timestamps (can be added and populated by the command below) |
 | `KEY_FIELD` | No | Key field name (auto-detected from index if not set) |
 | `INDEX_NAME` | No | Default index name (can override with `--index`) |
 | `DESIRED_PARTITIONS` | No | Number of partitions for parallel scan (default: 8) |
@@ -86,6 +87,29 @@ To start fresh instead of resuming:
 ```bash
 python -m src.copy_missing copy --index my-index --no-resume
 ```
+
+### Populate missing timestamps
+
+If the source index has no suitable timestamp field, or some documents have no
+value for it, populate them before scanning:
+
+```bash
+python -m src.copy_missing populate-timestamps --index my-index --page-size 1000
+```
+
+The command adds the configured `TIMESTAMP_FIELD` to both indexes as a
+filterable and sortable `Edm.DateTimeOffset` field when it does not exist, then
+uses partial document merges to fill only missing source values. The source
+field must be filterable, sortable, and retrievable for scanning. An existing
+destination field only needs to be an `Edm.DateTimeOffset` field for copied
+documents to accept the value. Generated timestamps are synthetic,
+uniformly distributed across the current UTC day, and are not actual document
+creation or modification times. A document key always maps to the same
+generated timestamp, so retrying stale search results is safe. If a timestamp
+field already exists, it must be an `Edm.DateTimeOffset` field that is
+filterable and sortable.
+`--page-size` sets the number of documents requested per Search response. It
+accepts values from **1 through 1000** and defaults to **1000**.
 
 ## Output Files
 
