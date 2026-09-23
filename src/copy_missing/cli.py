@@ -12,6 +12,7 @@ from .config import AppConfig
 from .copier import copy_missing_docs
 from .scanner import scan_index
 from .state import StateStore
+from .timestamp_population import populate_timestamps
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -40,6 +41,16 @@ def create_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument(
         "--state-dir", "-s",
         help="Directory to store scan results (or set STATE_DIR env var)",
+    )
+
+    # Populate timestamps command
+    populate_parser = subparsers.add_parser(
+        "populate-timestamps",
+        help="Add a timestamp field and populate documents that do not have one",
+    )
+    populate_parser.add_argument(
+        "--index", "-i",
+        help="Index name (or set INDEX_NAME env var)",
     )
     
     # Copy command
@@ -152,6 +163,33 @@ async def run_copy(
     return 0 if failure == 0 else 1
 
 
+async def run_populate_timestamps(
+    config: AppConfig,
+    index_name: str,
+    console: Console,
+) -> int:
+    """Add synthetic timestamps to documents in the source index that lack them."""
+    factory = ClientFactory()
+    index_client = factory.create_index_client(config.source)
+    try:
+        search_client = factory.create_async_search_client(config.source, index_name)
+        async with search_client:
+            updated_count = await populate_timestamps(
+                index_client=index_client,
+                search_client=search_client,
+                index_name=index_name,
+                timestamp_field=config.timestamp_field,
+            )
+    finally:
+        index_client.close()
+
+    console.print(
+        f"[green]Populated timestamps on {updated_count:,} documents "
+        f"in index '{index_name}'[/green]"
+    )
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     console = Console()
@@ -180,7 +218,10 @@ def main() -> int:
     elif args.command == "copy":
         resume = not args.no_resume
         return asyncio.run(run_copy(config, index_name, resume, console))
-    
+
+    elif args.command == "populate-timestamps":
+        return asyncio.run(run_populate_timestamps(config, index_name, console))
+
     return 0
 
 
