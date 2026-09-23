@@ -154,6 +154,70 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
             "createdAt",
         )
 
+    async def test_existing_destination_field_needs_only_datetime_type(self):
+        search_client = AsyncMock()
+        search_client.search.return_value = _search_results()
+        source_index_client = Mock()
+        source_index_client.get_index.return_value = SimpleNamespace(
+            fields=[SimpleNamespace(name="id", key=True)]
+        )
+        destination_index_client = Mock()
+        destination_index_client.get_index.return_value = SimpleNamespace(
+            fields=[
+                SimpleNamespace(name="id", key=True),
+                SimpleNamespace(
+                    name="createdAt",
+                    type=SearchFieldDataType.DateTimeOffset,
+                    filterable=False,
+                    sortable=False,
+                    hidden=True,
+                ),
+            ]
+        )
+
+        count = await populate_timestamps(
+            source_index_client,
+            destination_index_client,
+            search_client,
+            "items",
+            "createdAt",
+        )
+
+        self.assertEqual(count, 0)
+        destination_index_client.create_or_update_index.assert_not_called()
+        search_client.search.assert_awaited_once()
+
+    async def test_rejects_incompatible_existing_destination_field_type(self):
+        search_client = AsyncMock()
+        source_index_client = Mock()
+        source_index_client.get_index.return_value = SimpleNamespace(
+            fields=[SimpleNamespace(name="id", key=True)]
+        )
+        destination_index_client = Mock()
+        destination_index_client.get_index.return_value = SimpleNamespace(
+            fields=[
+                SimpleNamespace(name="id", key=True),
+                SimpleNamespace(
+                    name="createdAt",
+                    type=SearchFieldDataType.String,
+                    filterable=False,
+                    sortable=False,
+                    hidden=True,
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "must have type"):
+            await populate_timestamps(
+                source_index_client,
+                destination_index_client,
+                search_client,
+                "items",
+                "createdAt",
+            )
+
+        search_client.search.assert_not_awaited()
+
     async def test_retries_stale_results_without_merging_a_document_twice(self):
         search_client = AsyncMock()
         search_client.search.side_effect = [

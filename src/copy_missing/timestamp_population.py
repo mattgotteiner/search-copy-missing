@@ -22,7 +22,7 @@ def _validate_timestamp_field(
     index_client: SearchIndexClient,
     index_name: str,
     field_name: str,
-    require_retrievable: bool = True,
+    require_scan_capabilities: bool = True,
 ) -> str:
     """Ensure the timestamp field has the capabilities required by its use."""
     index = index_client.get_index(index_name)
@@ -49,16 +49,17 @@ def _validate_timestamp_field(
                 f"Field '{field_name}' in index '{index_name}' must have type "
                 "Edm.DateTimeOffset"
             )
-        if not timestamp_field.filterable or not timestamp_field.sortable:
-            raise ValueError(
-                f"Field '{field_name}' in index '{index_name}' must be filterable "
-                "and sortable; update the index definition before populating it"
-            )
-        if require_retrievable and getattr(timestamp_field, "hidden", False):
-            raise ValueError(
-                f"Field '{field_name}' in index '{index_name}' must be retrievable "
-                "for timestamp scanning; update the index definition"
-            )
+        if require_scan_capabilities:
+            if not timestamp_field.filterable or not timestamp_field.sortable:
+                raise ValueError(
+                    f"Field '{field_name}' in index '{index_name}' must be filterable "
+                    "and sortable; update the index definition before populating it"
+                )
+            if getattr(timestamp_field, "hidden", False):
+                raise ValueError(
+                    f"Field '{field_name}' in index '{index_name}' must be retrievable "
+                    "for timestamp scanning; update the index definition"
+                )
 
     return key_field.name
 
@@ -97,7 +98,7 @@ async def populate_timestamps(
         destination_index_client,
         index_name,
         timestamp_field,
-        require_retrievable=False,
+        require_scan_capabilities=False,
     )
     now = datetime.now(timezone.utc)
     start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
