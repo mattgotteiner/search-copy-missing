@@ -1,7 +1,8 @@
 """Populate missing synthetic timestamps in an Azure AI Search index."""
 
 import asyncio
-import random
+import hashlib
+from collections import deque
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -56,10 +57,12 @@ def _validate_timestamp_field(
     return key_field.name
 
 
-def _random_timestamp(start: datetime, end: datetime) -> str:
-    """Return a millisecond-precision UTC timestamp uniformly distributed in a range."""
+def _timestamp_for_key(key: str, start: datetime, end: datetime) -> str:
+    """Return a stable, uniformly distributed timestamp for a key within a range."""
     duration_ms = int((end - start).total_seconds() * 1000)
-    timestamp = start + timedelta(milliseconds=random.randint(0, duration_ms))
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    offset_ms = int.from_bytes(digest[:8], "big") % (duration_ms + 1)
+    timestamp = start + timedelta(milliseconds=offset_ms)
     return timestamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
@@ -85,8 +88,11 @@ async def populate_timestamps(
     start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
     end = datetime.combine(now.date(), time.max, tzinfo=timezone.utc)
     updated_count = 0
-
-    processed_keys: set[str] = set()
+    initial_missing_count: int | None = None
+    initial_count_captured = False
+    recent_page_fingerprints: deque[bytes] = deque(
+        maxlen=MAX_NO_PROGRESS_RETRIES
+    )
     no_progress_retries = 0
 
     while True:
@@ -96,62 +102,71 @@ async def populate_timestamps(
             select=[key_field],
             session_id=str(uuid4()),
             top=page_size,
+            include_total_count=not initial_count_captured,
         )
-        found_count = 0
-        batch_count = 0
+        if not initial_count_captured:
+            initial_missing_count = await results.get_count()
+            initial_count_captured = True
 
+        updates: list[dict[str, Any]] = []
+        page_keys: list[str] = []
         async for page in results.by_page():
-            updates: list[dict[str, Any]] = []
             async for document in page:
-                found_count += 1
                 key = document.get(key_field)
-                if key is None:
+                if not isinstance(key, str):
                     raise ValueError(
-                        f"Document in index '{index_name}' is missing key field '{key_field}'"
+                        f"Document in index '{index_name}' is missing string key "
+                        f"field '{key_field}'"
                     )
-                if key in processed_keys:
-                    continue
+                page_keys.append(key)
                 updates.append(
                     {
                         key_field: key,
-                        timestamp_field: _random_timestamp(start, end),
+                        timestamp_field: _timestamp_for_key(key, start, end),
                     }
                 )
 
-            if not updates:
-                continue
-
-            indexing_results = await search_client.merge_documents(documents=updates)
-            if len(indexing_results) != len(updates):
-                raise RuntimeError(
-                    f"Expected {len(updates)} indexing results but received "
-                    f"{len(indexing_results)}"
-                )
-            failures = [result for result in indexing_results if not result.succeeded]
-            if failures:
-                details = "; ".join(
-                    f"{result.key}: {result.error_message}" for result in failures[:5]
-                )
-                raise RuntimeError(
-                    f"Failed to populate timestamps on {len(failures)} documents: {details}"
-                )
-
-            processed_keys.update(result.key for result in indexing_results)
-            batch_count += len(indexing_results)
-
-        updated_count = len(processed_keys)
-        if found_count == 0:
+        if not page_keys:
             break
-        if batch_count == 0:
+
+        page_hash = hashlib.sha256()
+        for key in sorted(page_keys):
+            encoded_key = key.encode("utf-8")
+            page_hash.update(len(encoded_key).to_bytes(8, "big"))
+            page_hash.update(encoded_key)
+        fingerprint = page_hash.digest()
+        if fingerprint in recent_page_fingerprints:
             no_progress_retries += 1
             if no_progress_retries >= MAX_NO_PROGRESS_RETRIES:
                 raise RuntimeError(
-                    "Search continued returning documents already processed for "
-                    f"timestamp field '{timestamp_field}' after "
-                    f"{MAX_NO_PROGRESS_RETRIES} retries"
+                    "Search continued returning the same documents for timestamp "
+                    f"field '{timestamp_field}' after {MAX_NO_PROGRESS_RETRIES} retries"
                 )
             await asyncio.sleep(NO_PROGRESS_RETRY_DELAY)
-        else:
-            no_progress_retries = 0
+            continue
 
-    return updated_count
+        recent_page_fingerprints.append(fingerprint)
+        no_progress_retries = 0
+
+        indexing_results = await search_client.merge_documents(documents=updates)
+        if len(indexing_results) != len(updates):
+            raise RuntimeError(
+                f"Expected {len(updates)} indexing results but received "
+                f"{len(indexing_results)}"
+            )
+        failures = [result for result in indexing_results if not result.succeeded]
+        if failures:
+            details = "; ".join(
+                f"{result.key}: {result.error_message}" for result in failures[:5]
+            )
+            raise RuntimeError(
+                f"Failed to populate timestamps on {len(failures)} documents: {details}"
+            )
+
+        updated_count += len(indexing_results)
+
+    return (
+        initial_missing_count
+        if initial_missing_count is not None
+        else updated_count
+    )

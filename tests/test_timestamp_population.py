@@ -10,7 +10,7 @@ from azure.search.documents.indexes.models import SearchFieldDataType
 
 from copy_missing.cli import create_parser, parse_page_size
 from copy_missing.timestamp_population import (
-    _random_timestamp,
+    _timestamp_for_key,
     _validate_timestamp_field,
     populate_timestamps,
 )
@@ -37,11 +37,12 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse_page_size("1"), 1)
         self.assertEqual(parse_page_size("1000"), 1000)
 
-    def test_random_timestamp_is_utc_with_millisecond_precision(self):
+    def test_timestamp_is_stable_utc_with_millisecond_precision(self):
         start = datetime(2026, 9, 23, tzinfo=timezone.utc)
         end = datetime(2026, 9, 23, 23, 59, 59, 999000, tzinfo=timezone.utc)
 
-        timestamp = _random_timestamp(start, end)
+        timestamp = _timestamp_for_key("document-key", start, end)
+        self.assertEqual(timestamp, _timestamp_for_key("document-key", start, end))
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
         self.assertGreaterEqual(parsed, start)
@@ -150,6 +151,47 @@ class TimestampPopulationTests(unittest.IsolatedAsyncioTestCase):
         search_client.merge_documents.assert_awaited_once()
         sleep.assert_awaited_once_with(0.5)
 
+    async def test_partial_stale_pages_keep_duplicate_document_timestamps_stable(self):
+        search_client = AsyncMock()
+        search_client.search.side_effect = [
+            _search_results([{"id": "one"}, {"id": "two"}]),
+            _search_results([{"id": "two"}, {"id": "three"}]),
+            _search_results(),
+        ]
+
+        async def merge_documents(*, documents):
+            return [
+                SimpleNamespace(
+                    succeeded=True,
+                    key=document["id"],
+                    error_message=None,
+                )
+                for document in documents
+            ]
+
+        search_client.merge_documents.side_effect = merge_documents
+        index = SimpleNamespace(fields=[SimpleNamespace(name="id", key=True)])
+        index_client = Mock()
+        index_client.get_index.return_value = index
+
+        await populate_timestamps(
+            index_client,
+            search_client,
+            "items",
+            "createdAt",
+            page_size=2,
+        )
+
+        first_page = search_client.merge_documents.await_args_list[0].kwargs["documents"]
+        second_page = search_client.merge_documents.await_args_list[1].kwargs["documents"]
+        first_timestamp = next(
+            document["createdAt"] for document in first_page if document["id"] == "two"
+        )
+        second_timestamp = next(
+            document["createdAt"] for document in second_page if document["id"] == "two"
+        )
+        self.assertEqual(first_timestamp, second_timestamp)
+
     async def test_reports_partial_indexing_failures(self):
         search_client = AsyncMock()
         search_client.search.return_value = _search_results([{"id": "one"}])
@@ -170,8 +212,10 @@ async def _async_iter(items):
 
 
 def _search_results(*pages):
+    count = sum(len(page) for page in pages)
     return SimpleNamespace(
-        by_page=lambda: _async_iter([_async_iter(page) for page in pages])
+        by_page=lambda: _async_iter([_async_iter(page) for page in pages]),
+        get_count=AsyncMock(return_value=count),
     )
 
 
